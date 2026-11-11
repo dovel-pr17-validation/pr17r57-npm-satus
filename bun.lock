@@ -36,7 +36,7 @@
         "@happy-dom/global-registrator": "^21.0.4",
         "@oxlint/plugins": "1.92.0",
         "@playwright/test": "1.65.0",
-        "@sanity/icons": "^5.2.2",
+        "@sanity/icons": "^5.3.0",
         "@svgr/webpack": "^8.1.0",
         "@tailwindcss/node": "^4.3.5",
         "@tailwindcss/postcss": "^4.3.5",
@@ -1029,7 +1029,7 @@
 
     "@sanity/groq-condition-describe": ["@sanity/groq-condition-describe@0.5.2", "", { "dependencies": { "groq-js": "^1.30.2" } }, "sha512-HbP+UytB9gbScX5JuCM5mJNIZ093p3eeuDojqbf5KIunBaAqi0AuamsU5bjfNa/roE92xAJ9HDLbS5Vc93aPWA=="],
 
-    "@sanity/icons": ["@sanity/icons@5.2.3", "", { "peerDependencies": { "react": "^18 || ^19" } }, "sha512-10nE7IiuXIPIf6ufSKyNwnOE75wghEollUYzkjPUAX+5oenyE5qDFUrMD5MeC+8gxZ8KS61o8sH1mpmhpWx++w=="],
+    "@sanity/icons": ["@sanity/icons@5.3.0", "", { "peerDependencies": { "react": "^18 || ^19" } }, "sha512-8zPOrlK1TgCEj4c60jJ/Lljlro6S8DRfotiPaW1uTXwOjLWk2TSyqBdUaWCVDgWuHgw4jhijg2pBf7o23KFNMA=="],
 
     "@sanity/id-utils": ["@sanity/id-utils@1.1.0", "", { "dependencies": { "@sanity/uuid": "^3.0.2", "ts-brand": "^0.2.0" } }, "sha512-A+DujVHCO3/+0DuzinmfCRQacIWVIherK0AHqFDoDOSgxx+Bur1kLhzX8fn7PdB2uZilxu2zWOr+UaGcj5zGbA=="],
 
