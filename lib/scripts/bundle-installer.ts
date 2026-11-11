@@ -1,0 +1,395 @@
+import { mkdir } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+
+import * as p from '@clack/prompts'
+
+import {
+  applyCodeTransforms,
+  type TransformFailure,
+} from './ast-transforms/index'
+import { findBarrelLine, insertBarrelLine } from './barrel-file'
+import {
+  type CodeTransform,
+  getIntegrationEntries,
+  type IntegrationBundle,
+} from './integration-bundles'
+import {
+  listPayloadFiles,
+  type PayloadPackageJson,
+  type PayloadSource,
+  payloadPathExists,
+  readPayloadFile,
+} from './payload-source'
+import { pathExists, resolvePath } from './utils'
+
+/** A bundle counts as installed when its first folder (or file) exists. */
+export function bundleProbePath(bundle: IntegrationBundle): string | undefined {
+  return bundle.folders[0] ?? bundle.files[0]
+}
+
+export const isInstalled = async (
+  bundle: IntegrationBundle
+): Promise<boolean> => {
+  const probe = bundleProbePath(bundle)
+  if (!probe) return false
+  return pathExists(resolvePath(probe))
+}
+
+/**
+ * Copy the bundle's `folders` and `files` from the payload source. Existing
+ * files are kept (unless --force). Throws when the payload lacks a declared
+ * folder or file.
+ */
+export const copyBundleFiles = async (
+  source: PayloadSource,
+  bundle: IntegrationBundle,
+  options: { dryRun: boolean; force: boolean }
+): Promise<{ copied: number; skipped: number }> => {
+  const relFiles: string[] = []
+
+  for (const folder of bundle.folders) {
+    relFiles.push(...(await listPayloadFiles(source, folder)))
+  }
+  for (const file of bundle.files) {
+    if (!(await payloadPathExists(source, file))) {
+      throw new Error(`Payload source (${source.label}) is missing ${file}`)
+    }
+    relFiles.push(file)
+  }
+
+  let copied = 0
+  let skipped = 0
+
+  for (const rel of relFiles) {
+    const dest = resolvePath(rel)
+    if ((await pathExists(dest)) && !options.force) {
+      skipped++
+      continue
+    }
+    if (!options.dryRun) {
+      await mkdir(dirname(dest), { recursive: true })
+      await Bun.write(dest, Bun.file(join(source.root, rel)))
+    }
+    copied++
+  }
+
+  return { copied, skipped }
+}
+
+/**
+ * Copy the bundle's integration-owned `overwriteFiles` from the payload source,
+ * unconditionally. `setup:project` (the sole caller, via `installBundle`)
+ * strips every integration to lean core (step 6 of `setup()`) before re-adding
+ * the kept set, so nothing locally modified is left to preserve. Skips the
+ * write when the file already matches the payload.
+ */
+export const applyOverwriteFiles = async (
+  source: PayloadSource,
+  bundle: IntegrationBundle,
+  options: { dryRun: boolean }
+): Promise<{ written: string[] }> => {
+  const written: string[] = []
+
+  for (const rel of bundle.overwriteFiles ?? []) {
+    const payloadText = await readPayloadFile(source, rel)
+    const dest = resolvePath(rel)
+
+    if (await pathExists(dest)) {
+      const localText = await Bun.file(dest).text()
+      if (localText === payloadText) continue // already wired
+    }
+
+    if (!options.dryRun) {
+      await mkdir(dirname(dest), { recursive: true })
+      await Bun.write(dest, payloadText)
+    }
+    written.push(rel)
+  }
+
+  return { written }
+}
+
+const sortRecord = (record: Record<string, string>): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(record).sort(([a], [b]) => a.localeCompare(b))
+  )
+
+/**
+ * Add the bundle's dependencies to the local package.json, pinned to the
+ * payload's versions. Dependencies already present keep their pin.
+ */
+export const addDependencies = async (
+  bundle: IntegrationBundle,
+  payloadPkg: PayloadPackageJson,
+  options: { dryRun: boolean }
+): Promise<{ added: string[]; missing: string[] }> => {
+  const pkgPath = resolvePath('package.json')
+  // Only the fields touched below are typed; others round-trip untouched.
+  const pkg: {
+    dependencies?: Record<string, string>
+    devDependencies?: Record<string, string>
+  } = await Bun.file(pkgPath).json()
+
+  const added: string[] = []
+  const missing: string[] = []
+
+  const addFrom = (
+    names: string[],
+    target: 'dependencies' | 'devDependencies'
+  ): void => {
+    for (const name of names) {
+      const version =
+        payloadPkg.dependencies?.[name] ?? payloadPkg.devDependencies?.[name]
+      if (!version) {
+        missing.push(name)
+        continue
+      }
+      const record = pkg[target] ?? {}
+      pkg[target] = record
+      if (record[name]) continue // already present — keep the local pin
+      record[name] = version
+      added.push(`${name}@${version}`)
+    }
+  }
+
+  addFrom(bundle.dependencies, 'dependencies')
+  addFrom(bundle.devDependencies, 'devDependencies')
+
+  if (added.length > 0 && !options.dryRun) {
+    if (pkg.dependencies) pkg.dependencies = sortRecord(pkg.dependencies)
+    if (pkg.devDependencies) {
+      pkg.devDependencies = sortRecord(pkg.devDependencies)
+    }
+    await Bun.write(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`)
+  }
+
+  return { added, missing }
+}
+
+/**
+ * Copy the bundle's package.json scripts from the payload. A script already
+ * present locally keeps its local command.
+ *
+ * A declared script the payload lacks is warned about and skipped, not thrown:
+ * setup:project's payload is the project's own pre-strip package.json, so it is
+ * a script the fork removed, and a throw would land after setupLean already
+ * stripped the bundle, leaving it half re-added on every re-run. Cost: a kept
+ * integration can finish setup without a script it declares, and only the
+ * warning says so.
+ */
+export const addScripts = async (
+  bundle: IntegrationBundle,
+  payloadPkg: PayloadPackageJson,
+  options: { dryRun: boolean }
+): Promise<string[]> => {
+  const names = bundle.scripts ?? []
+  if (names.length === 0) return []
+
+  const missing = names.filter((name) => !payloadPkg.scripts?.[name])
+  if (missing.length > 0) {
+    p.log.warn(
+      `Payload package.json has no ${missing.join(', ')} script for ${bundle.name}: nothing to restore, skipping`
+    )
+  }
+
+  const pkgPath = resolvePath('package.json')
+  const pkg: { scripts?: Record<string, string> } =
+    await Bun.file(pkgPath).json()
+  const scripts = pkg.scripts ?? {}
+  pkg.scripts = scripts
+
+  const added: string[] = []
+  for (const name of names) {
+    const command = payloadPkg.scripts?.[name]
+    if (command === undefined || name in scripts) continue
+    scripts[name] = command
+    added.push(name)
+  }
+
+  if (added.length > 0 && !options.dryRun) {
+    await Bun.write(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`)
+  }
+  return added
+}
+
+/**
+ * Restore the bundle's barrel export lines from the payload's barrel into the
+ * local one (created when missing). Warns when the payload has no matching
+ * barrel or line.
+ */
+export const restoreBarrelExports = async (
+  source: PayloadSource,
+  bundle: IntegrationBundle,
+  options: { dryRun: boolean }
+): Promise<number> => {
+  let changes = 0
+
+  for (const { file, pattern } of bundle.barrelExports) {
+    if (!(await payloadPathExists(source, file))) {
+      p.log.warn(
+        `Payload source has no barrel file ${file} — skipping export restore for "${pattern}"`
+      )
+      continue
+    }
+
+    const sourceText = await readPayloadFile(source, file)
+    const line = findBarrelLine(sourceText, pattern)
+    if (!line) {
+      p.log.warn(
+        `No export line matching "${pattern}" in payload ${file} — skipping`
+      )
+      continue
+    }
+
+    const localPath = resolvePath(file)
+    const localText = (await pathExists(localPath))
+      ? await Bun.file(localPath).text()
+      : ''
+    const updated = insertBarrelLine(localText, line)
+
+    if (updated !== localText) {
+      if (!options.dryRun) {
+        await mkdir(dirname(localPath), { recursive: true })
+        await Bun.write(localPath, updated)
+      }
+      changes++
+    }
+  }
+
+  return changes
+}
+
+/** Append missing env vars as commented stubs to .env.example (created when absent). */
+export const appendEnvStubs = async (
+  envVars: string[],
+  dryRun: boolean
+): Promise<number> => {
+  if (envVars.length === 0) return 0
+
+  const envPath = resolvePath('.env.example')
+  const exists = await pathExists(envPath)
+  const content = exists ? await Bun.file(envPath).text() : ''
+
+  const missing = envVars.filter(
+    (envVar) => !new RegExp(`^#?\\s*${envVar}=`, 'm').test(content)
+  )
+  if (missing.length === 0) return 0
+
+  if (!dryRun) {
+    const base =
+      content.length === 0 || content.endsWith('\n') ? content : `${content}\n`
+    const stubs = missing.map((envVar) => `# ${envVar}=`).join('\n')
+    await Bun.write(envPath, `${base}${stubs}\n`)
+  }
+
+  return missing.length
+}
+
+/**
+ * Run the per-bundle install sequence: copy files, restore overwrite files, add
+ * dependencies and scripts, restore barrel exports, append env stubs, apply
+ * additive code transforms.
+ *
+ * Returns `details` (one entry per action taken) for logging, plus `failures`
+ * from the additive code transforms (collected, never thrown, so callers can
+ * fail loudly once the whole batch is done instead of aborting mid-run).
+ */
+export const installBundle = async (
+  source: PayloadSource,
+  bundle: IntegrationBundle,
+  payloadPkg: PayloadPackageJson,
+  options: { dryRun: boolean; force: boolean }
+): Promise<{
+  details: string[]
+  depsAdded: string[]
+  changedFiles: string[]
+  failures: TransformFailure[]
+}> => {
+  const details: string[] = []
+
+  const { copied, skipped } = await copyBundleFiles(source, bundle, options)
+  if (copied > 0) details.push(`${copied} files copied`)
+  if (skipped > 0) details.push(`${skipped} existing files kept`)
+
+  const overwrite = await applyOverwriteFiles(source, bundle, options)
+  if (overwrite.written.length > 0) {
+    details.push(`${overwrite.written.length} integration-owned files restored`)
+  }
+
+  const deps = await addDependencies(bundle, payloadPkg, options)
+  if (deps.added.length > 0) {
+    details.push(`${deps.added.length} dependencies pinned`)
+  }
+
+  const scriptsAdded = await addScripts(bundle, payloadPkg, options)
+  if (scriptsAdded.length > 0) {
+    details.push(`${scriptsAdded.length} package.json scripts restored`)
+  }
+
+  const barrelChanges = await restoreBarrelExports(source, bundle, options)
+  if (barrelChanges > 0) {
+    details.push(`${barrelChanges} barrel exports restored`)
+  }
+
+  const envChanges = await appendEnvStubs(bundle.envVars, options.dryRun)
+  if (envChanges > 0) details.push(`${envChanges} env stubs appended`)
+
+  const transformResult = await applyCodeTransforms(
+    bundle.addTransforms ?? [],
+    options.dryRun
+  )
+  if (transformResult.changes > 0) {
+    details.push(`${transformResult.changes} files re-wired`)
+  }
+
+  return {
+    details,
+    depsAdded: deps.added,
+    changedFiles: transformResult.changedFiles,
+    failures: transformResult.failures,
+  }
+}
+
+/**
+ * Strip absent-integration wiring from freshly copied files: for every
+ * integration NOT in `installedOrAdded` and not installed on disk, apply its
+ * subtractive `codeTransforms` (no-ops on files already lean, so it is safe
+ * after an install). Returns the files changed and any collected failures.
+ *
+ * Downgrades every op's `required` flag to false before applying: `setupLean`'s
+ * union pass already applied every bundle's codeTransforms once to the
+ * original files, which is where a required-match violation (drifted source)
+ * is caught. This later pass finding nothing left to strip is the expected
+ * outcome, not drift, and enforcing `required` again would false-positive on
+ * every preset that doesn't keep every integration.
+ */
+export const stripAbsentIntegrationWiring = async (
+  installedOrAdded: Set<string> | string[],
+  dryRun: boolean
+): Promise<{
+  changes: number
+  changedFiles: string[]
+  failures: TransformFailure[]
+}> => {
+  const skipSet =
+    installedOrAdded instanceof Set
+      ? installedOrAdded
+      : new Set(installedOrAdded)
+
+  const stripTransforms: CodeTransform[] = []
+  for (const [id, bundle] of getIntegrationEntries()) {
+    if (skipSet.has(id)) continue
+    if (await isInstalled(bundle)) continue
+    stripTransforms.push(...bundle.codeTransforms)
+  }
+
+  if (stripTransforms.length === 0) {
+    return { changes: 0, changedFiles: [], failures: [] }
+  }
+
+  const nonRequiredTransforms = stripTransforms.map((transform) => ({
+    ...transform,
+    ops: transform.ops.map((op) => ({ ...op, required: false })),
+  }))
+  return applyCodeTransforms(nonRequiredTransforms, dryRun)
+}

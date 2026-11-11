@@ -1,0 +1,91 @@
+'use client'
+
+import type { LenisOptions } from 'lenis'
+
+import 'lenis/dist/lenis.css'
+import type { LenisRef, LenisProps as ReactLenisProps } from 'lenis/react'
+import { ReactLenis } from 'lenis/react'
+import dynamic from 'next/dynamic'
+import { useRef } from 'react'
+import { useTempus } from 'tempus/react'
+
+const LenisAnimeSync = dynamic(
+  () => import('./anime').then((mod) => mod.LenisAnimeSync),
+  {
+    ssr: false,
+  }
+)
+
+function isOverlay(target: EventTarget) {
+  return (
+    target instanceof Element &&
+    (target.nodeName === 'VERCEL-LIVE-FEEDBACK' ||
+      target.id === 'theatrejs-studio-root' ||
+      // Shadow host; composedPath() reaches it.
+      target.id === 'react-scan-root')
+  )
+}
+
+// `wheel` and `programmatic` are spread over defaults here and again inside
+// Lenis, so a key that is present but `undefined` (`{ lerp: undefined }`)
+// replaces the default and turns smoothing off. Drop those keys first.
+function withoutUndefined<T extends object>(value: T | undefined): Partial<T> {
+  const defined: Partial<T> = { ...value }
+  for (const key in defined) {
+    if (defined[key] === undefined) delete defined[key]
+  }
+  return defined
+}
+
+interface LenisProps extends Omit<ReactLenisProps, 'ref'> {
+  root: boolean
+  options: LenisOptions
+  syncAnime?: boolean
+}
+
+export function Lenis({ root, options, syncAnime = false }: LenisProps) {
+  const lenisRef = useRef<LenisRef>(null)
+
+  // Tempus runs callbacks in ascending order inside one rAF. Lenis moves the
+  // document here, so anything that reads `lenis.scroll` to draw must run after
+  // it or it paints a frame behind the DOM. Every explicit order, in one
+  // place; a new `useTempus` callback picks one relative to these:
+  //
+  //   -Infinity  Stats.begin            lib/dev/stats
+  //   -1         Lenis.raf              here
+  //    1         WebGL RAF (advance)    lib/webgl/components/raf, skipped while asleep
+  //    6         Marquee                components/ui/marquee
+  //   10         anime engine.update    components/layout/lenis/anime.tsx
+  //   1000       DOM write queue        lib/utils/raf.ts
+  //   +Infinity  Stats.end              lib/dev/stats
+  useTempus(
+    ({ time }) => {
+      if (lenisRef.current?.lenis) {
+        lenisRef.current.lenis.raf(time)
+      }
+    },
+    { order: -1 }
+  )
+
+  return (
+    <ReactLenis
+      ref={lenisRef}
+      root={root}
+      options={{
+        ...options,
+        wheel: { lerp: 0.125, ...withoutUndefined(options?.wheel) },
+        programmatic: {
+          lerp: 0.125,
+          ...withoutUndefined(options?.programmatic),
+        },
+        // Tempus drives raf above.
+        autoRaf: false,
+        // Let overlays scroll natively.
+        onGesture: ({ event }) =>
+          event.composedPath().some(isOverlay) ? false : undefined,
+      }}
+    >
+      {syncAnime && root && <LenisAnimeSync />}
+    </ReactLenis>
+  )
+}

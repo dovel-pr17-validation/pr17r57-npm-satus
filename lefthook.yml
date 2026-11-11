@@ -1,0 +1,58 @@
+pre-commit:
+  parallel: true
+  commands:
+    # Format then lint, sequentially inside ONE command, so the two binaries
+    # never write the same file concurrently. --no-error-on-unmatched-pattern
+    # is required: oxlint exits 1 on a docs- or CSS-only commit, where none of
+    # the staged files are JS/TS for it to lint.
+    # --type-aware is deliberately absent; it runs in `bun run check` and CI so
+    # that commits stay fast.
+    oxc:
+      glob: '*.{js,mjs,cjs,ts,tsx,jsx,css,json,jsonc,md,yml,yaml,toml}'
+      run: bun oxfmt --no-error-on-unmatched-pattern {staged_files} && bun oxlint --fix --max-warnings=0 --no-error-on-unmatched-pattern {staged_files}
+      stage_fixed: true
+    typecheck:
+      glob: '*.{ts,tsx}'
+      # Incremental is safe: tsc is the only writer of tsconfig.tsbuildinfo,
+      # and the warm cache is ~4x faster.
+      run: bun node_modules/typescript/bin/tsc --noEmit
+      stage_fixed: false
+    # A plain value in a committed env file must never reach git, not even in a
+    # commit that is fixed before pushing. The test reads the staged version.
+    env-files:
+      glob:
+        - '.env*'
+        - '**/.env*'
+      run: bun test lib/env-files.test.ts
+
+commit-msg:
+  commands:
+    # {1} is the path git passes to the hook: the message file.
+    conventional:
+      run: bun lib/scripts/check-commit-msg.ts {1}
+
+# Build stays CI-only (too slow for a local pre-push gate). Tests (~4s) and
+# the manifest check (~1s) are cheap enough to run here, so a push can't land
+# with a broken suite or a stale COMPONENTS.md.
+pre-push:
+  commands:
+    test-and-manifest:
+      run: bun test --parallel && bun run manifest:check
+      skip:
+        - merge
+        - rebase
+
+# Stale route types in .next/types (included by tsconfig) cause ghost tsc
+# errors after a branch switch. {3} is 1 for a branch switch, 0 for a file
+# checkout. They regenerate on the next `bun dev` / `bun run build`.
+post-checkout:
+  commands:
+    clear-generated-types:
+      skip:
+        - rebase
+      run: '[ "{3}" != "1" ] || rm -rf .next/types .next/dev/types'
+
+post-merge:
+  commands:
+    install-deps:
+      run: bun install --frozen-lockfile

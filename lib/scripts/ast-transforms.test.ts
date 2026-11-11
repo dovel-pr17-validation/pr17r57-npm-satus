@@ -1,0 +1,1248 @@
+/**
+ * Every additive op must be effective (inserts when absent), idempotent
+ * (byte-for-byte unchanged when present) and format-resilient (compact,
+ * quoted-key and multiline variants). Round-trip tests remove-then-add (and
+ * the reverse) on a next.config-shaped fixture.
+ */
+
+import { describe, expect, it } from 'bun:test'
+
+import type { AstOperation } from './ast-operation-types'
+import {
+  applyCodeTransforms,
+  applyOpsToText,
+  RequiredOpMatchError,
+} from './ast-transforms'
+
+/** Number of times `needle` occurs in `haystack`. */
+function count(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1
+}
+
+const nextConfigFixture = `const nextConfig: NextConfig = {
+  experimental: {
+    optimizePackageImports: [
+      'gsap',
+      'three',
+    ],
+  },
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'cdn.shopify.com',
+      },
+    ],
+  },
+}
+
+export default nextConfig
+`
+
+// Same semantics, hostile formatting.
+const compactConfigFixture = `const nextConfig = {
+  experimental: { optimizePackageImports: ["gsap","three"] },
+  images: { remotePatterns: [{"protocol":"https","hostname":"cdn.shopify.com"}] },
+}
+`
+
+describe('removeCallArgument', () => {
+  const op: AstOperation = {
+    kind: 'removeCallArgument',
+    callee: 'useContextBridge',
+    argument: 'SheetContext',
+  }
+
+  it('drops the named argument and is idempotent', () => {
+    const fixture = `const Bridge = useContextBridge(TransformContext, SheetContext)\n`
+    const result = applyOpsToText(fixture, [op])
+    expect(result).toContain('useContextBridge(TransformContext)')
+    expect(result).not.toContain('SheetContext')
+    expect(applyOpsToText(result, [op])).toBe(result)
+  })
+
+  it('is an exact no-op when the argument is already absent', () => {
+    const fixture = `const Bridge = useContextBridge(TransformContext)\n`
+    expect(applyOpsToText(fixture, [op])).toBe(fixture)
+  })
+
+  it('leaves calls to other callees untouched', () => {
+    const fixture = `useOther(TransformContext, SheetContext)\n`
+    expect(applyOpsToText(fixture, [op])).toBe(fixture)
+  })
+})
+
+describe('replaceFunctionBody / replaceJsDoc — indentation-insensitive skip', () => {
+  it('applies when the body differs only inside a template literal interior', () => {
+    // Per-line trim comparison would judge these bodies equal (every line's
+    // trimmed text matches) and skip the replacement; only the literal's
+    // interior indentation differs, and that whitespace is content.
+    const fixture = `function greet() {
+  return \`hello
+      world\`
+}
+`
+    const op: AstOperation = {
+      kind: 'replaceFunctionBody',
+      functionName: 'greet',
+      replacement: '{\n  return `hello\n  world`\n}',
+    }
+    const result = applyOpsToText(fixture, [op])
+    expect(result).toContain('  world`')
+    expect(result).not.toContain('      world`')
+    expect(applyOpsToText(result, [op])).toBe(result)
+  })
+
+  it('applies when the JSDoc differs only in trailing whitespace', () => {
+    const fixture = `/** greets */
+function greet() {
+  return 1
+}
+`
+    const op: AstOperation = {
+      kind: 'replaceJsDoc',
+      functionName: 'greet',
+      replacement: '/** greets loudly */',
+    }
+    const trailing: AstOperation = {
+      kind: 'replaceJsDoc',
+      functionName: 'greet',
+      replacement: '/** greets  loudly */',
+    }
+    const once = applyOpsToText(fixture, [op])
+    expect(once).toContain('/** greets loudly */')
+    // Interior double space is content, not indentation — must still apply.
+    const twice = applyOpsToText(once, [trailing])
+    expect(twice).toContain('/** greets  loudly */')
+    expect(applyOpsToText(twice, [trailing])).toBe(twice)
+  })
+})
+
+describe('removeIfStatement', () => {
+  const op: AstOperation = {
+    kind: 'removeIfStatement',
+    conditionContains: 'isShopifyWebhook',
+  }
+
+  it('removes the matching if statement and is idempotent', () => {
+    const fixture = `function handler() {
+  const isShopifyWebhook = true
+
+  if (isShopifyWebhook) {
+    return shopifyRevalidate()
+  }
+
+  return null
+}
+`
+    const result = applyOpsToText(fixture, [op])
+    expect(result).not.toContain('if (isShopifyWebhook)')
+    expect(result).not.toContain('shopifyRevalidate()')
+    expect(result).toContain('return null')
+    expect(applyOpsToText(result, [op])).toBe(result)
+  })
+
+  it('is an exact no-op when no if-statement matches the condition', () => {
+    const fixture = `function handler() {
+  if (otherCondition) {
+    return null
+  }
+  return true
+}
+`
+    expect(applyOpsToText(fixture, [op])).toBe(fixture)
+  })
+
+  it('leaves if-statements with a different condition untouched', () => {
+    const fixture = `function handler() {
+  if (isSanityWebhook) {
+    return sanityRevalidate()
+  }
+  if (isShopifyWebhook) {
+    return shopifyRevalidate()
+  }
+  return null
+}
+`
+    const result = applyOpsToText(fixture, [op])
+    expect(result).toContain('if (isSanityWebhook)')
+    expect(result).toContain('sanityRevalidate()')
+    expect(result).not.toContain('isShopifyWebhook')
+    expect(result).not.toContain('shopifyRevalidate')
+  })
+
+  it('matches a compound condition via substring (either signal routes to the guard)', () => {
+    const fixture = `function handler() {
+  const isShopifyWebhook = a || b
+  if (isShopifyWebhook) {
+    return shopifyRevalidate()
+  }
+  return null
+}
+`
+    const result = applyOpsToText(fixture, [op])
+    expect(result).not.toContain('if (isShopifyWebhook)')
+  })
+
+  it('removes every matching if-statement in the file', () => {
+    const fixture = `function a() {
+  if (isShopifyWebhook) return 1
+}
+function b() {
+  if (isShopifyWebhook) return 2
+}
+`
+    const result = applyOpsToText(fixture, [op])
+    expect(result).not.toContain('isShopifyWebhook')
+  })
+})
+
+// Shopify webhook dispatch strip: composed ops (removeImport +
+// removeVariableStatement + removeIfStatement) against a route.ts-shaped fixture.
+
+describe('Shopify webhook dispatch strip (composed ops)', () => {
+  // The current route shape (app/api/revalidate/route.ts): two provider
+  // guard + dispatch pairs and a provider-neutral 404 fallback, no rate limit.
+  const routeFixture = `import { type NextRequest, NextResponse } from 'next/server'
+
+import { revalidate as sanityRevalidate } from '@/integrations/sanity/revalidate'
+import { revalidate as shopifyRevalidate } from '@/integrations/shopify/revalidate'
+
+export async function POST(request: NextRequest) {
+  // Shopify webhooks identify themselves with an \`x-shopify-topic\` header and
+  // always carry a \`secret\` query param.
+  const isShopifyWebhook =
+    request.headers.has('x-shopify-topic') ||
+    request.nextUrl.searchParams.has('secret')
+
+  if (isShopifyWebhook) {
+    return shopifyRevalidate(request)
+  }
+
+  // Sanity signs its webhook body and sends the signature in this header.
+  const isSanityWebhook = request.headers.has('sanity-webhook-signature')
+
+  if (isSanityWebhook) {
+    return sanityRevalidate(request)
+  }
+
+  return NextResponse.json(
+    { data: null, error: 'No webhook handler configured' },
+    { status: 404 }
+  )
+}
+`
+
+  const shopifyOps: AstOperation[] = [
+    { kind: 'removeImport', specifier: '@/integrations/shopify/revalidate' },
+    { kind: 'removeVariableStatement', name: 'isShopifyWebhook' },
+    { kind: 'removeIfStatement', conditionContains: 'isShopifyWebhook' },
+  ]
+
+  it('removes the import, guard variable, and dispatch, keeping the rest of the route intact', () => {
+    const result = applyOpsToText(routeFixture, shopifyOps)
+
+    expect(result).not.toContain('@/integrations/shopify/revalidate')
+    expect(result).not.toContain('shopifyRevalidate')
+    expect(result).not.toContain('isShopifyWebhook')
+
+    // Untouched: the Sanity guard + dispatch and the neutral 404 fallback.
+    expect(count(result, 'sanityRevalidate')).toBe(2) // import + dispatch
+    expect(result).toContain('const isSanityWebhook')
+    expect(result).toContain("error: 'No webhook handler configured'")
+    expect(result).toContain("from 'next/server'")
+
+    expect(applyOpsToText(result, shopifyOps)).toBe(result)
+  })
+})
+
+// addFunctionBodyStatement anchors. Failure modes:
+//
+// 1. `beforeContains` inserts between the anchor and its leading comment,
+//    so the comment ends up describing the inserted text instead.
+// 2. A named anchor that matches nothing falls back to appending after the
+//    last statement, landing after a terminal return as dead code.
+// 3. That miss leaves the file changed or unreported, so a `required` op
+//    passes and self-prune deletes the script that could re-run it.
+// 4. A candidate list takes a later candidate while an earlier one matches,
+//    or gives up when only a later one matches.
+// 5. Re-applying the op duplicates the statement.
+// 6. An anchor that is the block's first statement (its comment right after
+//    the opening brace) lands the text outside the body or mid-line.
+
+describe('addFunctionBodyStatement anchors', () => {
+  const fixture = `export function POST() {
+  // explains the first guard
+  const first = 1
+
+  if (first) {
+    return first
+  }
+
+  // explains the fallback
+  return 0
+}
+`
+
+  const guard = (
+    beforeContains: string | readonly string[],
+    required = false
+  ): AstOperation => ({
+    kind: 'addFunctionBodyStatement',
+    functionName: 'POST',
+    marker: 'const added',
+    text: '  const added = 2',
+    beforeContains,
+    required,
+  })
+
+  it('inserts ahead of the anchor leading comment (modes 1, 6)', () => {
+    const fallback = applyOpsToText(fixture, [guard('return 0')])
+    expect(fallback).toContain(
+      '  const added = 2\n\n  // explains the fallback\n  return 0'
+    )
+
+    const first = applyOpsToText(fixture, [guard('const first')])
+    expect(first).toContain(
+      'export function POST() {\n  const added = 2\n\n  // explains the first guard\n  const first = 1'
+    )
+  })
+
+  it('leaves the text unchanged when no anchor matches (mode 2)', () => {
+    expect(applyOpsToText(fixture, [guard('not in the body')])).toBe(fixture)
+    const afterMiss: AstOperation = {
+      kind: 'addFunctionBodyStatement',
+      functionName: 'POST',
+      marker: 'const added',
+      text: '  const added = 2',
+      afterContains: 'not in the body',
+    }
+    expect(applyOpsToText(fixture, [afterMiss])).toBe(fixture)
+  })
+
+  it('reports a required anchor miss, alone or beside a sibling change (mode 3)', () => {
+    expect(() =>
+      applyOpsToText(fixture, [guard('not in the body', true)])
+    ).toThrow(RequiredOpMatchError)
+
+    const sibling: AstOperation = {
+      kind: 'addImport',
+      text: "import { x } from 'y'",
+    }
+    expect(() =>
+      applyOpsToText(fixture, [sibling, guard('not in the body', true)])
+    ).toThrow(RequiredOpMatchError)
+  })
+
+  it('takes the first candidate that matches (mode 4)', () => {
+    const preferFirst = applyOpsToText(fixture, [
+      guard(['const first', 'return 0']),
+    ])
+    expect(preferFirst.indexOf('const added')).toBeLessThan(
+      preferFirst.indexOf('const first')
+    )
+
+    const fallBack = applyOpsToText(fixture, [
+      guard(['not in the body', 'return 0']),
+    ])
+    expect(fallBack.indexOf('const added')).toBeGreaterThan(
+      fallBack.indexOf('return first')
+    )
+    expect(fallBack.indexOf('const added')).toBeLessThan(
+      fallBack.indexOf('return 0')
+    )
+  })
+
+  it('is a no-op once the marker is present, even when required (mode 5)', () => {
+    const once = applyOpsToText(fixture, [guard('return 0', true)])
+    expect(applyOpsToText(once, [guard('return 0', true)])).toBe(once)
+    expect(count(once, 'const added')).toBe(1)
+  })
+})
+
+// A required addFunctionBodyStatement whose marker is already in the body is a
+// success, not a miss, even when a sibling op changes the same file (the runner
+// used to throw "matched nothing while others applied"). Reproduced with the
+// webhook route missing only its Sanity import, then re-adding Sanity: the
+// import goes back, the guard is already there.
+
+describe('required addFunctionBodyStatement beside a sibling change', () => {
+  const fixture = `export function POST() {
+  const added = 2
+
+  return 0
+}
+`
+
+  const ops: AstOperation[] = [
+    { kind: 'addImport', text: "import { x } from 'y'" },
+    {
+      kind: 'addFunctionBodyStatement',
+      functionName: 'POST',
+      marker: 'const added',
+      text: '  const added = 2',
+      beforeContains: 'return 0',
+      required: true,
+    },
+  ]
+
+  it('applies the sibling and leaves the present statement alone', () => {
+    const result = applyOpsToText(fixture, ops)
+    expect(result).toContain("import { x } from 'y'")
+    expect(count(result, 'const added')).toBe(1)
+  })
+
+  it('still reports an anchor miss beside the same sibling change', () => {
+    const withoutStatement = fixture.replace('  const added = 2\n\n', '')
+    const missing: AstOperation[] = [
+      { kind: 'addImport', text: "import { x } from 'y'" },
+      {
+        kind: 'addFunctionBodyStatement',
+        functionName: 'POST',
+        marker: 'const added',
+        text: '  const added = 2',
+        beforeContains: 'not in the body',
+        required: true,
+      },
+    ]
+    expect(() => applyOpsToText(withoutStatement, missing)).toThrow(
+      RequiredOpMatchError
+    )
+  })
+})
+
+// syncUnusedParameterPrefix. Failure modes:
+//
+// 1. A parameter the body still reads gets prefixed, leaving the body's
+//    references dangling.
+// 2. A parameter nothing reads keeps its bare name, so `noUnusedParameters`
+//    and oxlint's no-unused-vars fail the scaffold.
+// 3. The rename reaches body references, not just the declaration.
+// 4. A property name (`x.request`, `{ request: 1 }`) counts as a read and
+//    keeps an unused parameter bare.
+// 5. Once code reading the parameter is re-added, the prefix stays.
+// 6. Re-applying changes the file again, or an in-sync no-op counts as a
+//    required miss when a sibling op changed the file.
+// 7. A required op whose function or parameter is gone passes silently.
+// 8. A body that reads the prefixed name itself gets renamed out from under
+//    the author.
+
+describe('syncUnusedParameterPrefix', () => {
+  const sync = (required = false): AstOperation => ({
+    kind: 'syncUnusedParameterPrefix',
+    functionName: 'POST',
+    parameterName: 'request',
+    required,
+  })
+
+  const used = `export function POST(request: Request) {
+  return request.headers.has('x')
+}
+`
+  const unused = `export function POST(request: Request) {
+  const meta = { request: 1 }
+  return meta.request
+}
+`
+
+  it('keeps a read parameter bare (mode 1)', () => {
+    expect(applyOpsToText(used, [sync()])).toBe(used)
+  })
+
+  it('prefixes an unread parameter, declaration only (modes 2, 3, 4)', () => {
+    const result = applyOpsToText(unused, [sync()])
+    expect(result).toContain('export function POST(_request: Request)')
+    expect(result).toContain('const meta = { request: 1 }')
+    expect(result).toContain('return meta.request')
+  })
+
+  it('drops the prefix once the body reads the parameter again (mode 5)', () => {
+    const prefixed = used.replace('(request:', '(_request:')
+    expect(applyOpsToText(prefixed, [sync()])).toBe(used)
+  })
+
+  it('is idempotent and not a miss beside a sibling change (mode 6)', () => {
+    const once = applyOpsToText(unused, [sync(true)])
+    expect(applyOpsToText(once, [sync(true)])).toBe(once)
+
+    const sibling: AstOperation = {
+      kind: 'addImport',
+      text: "import { x } from 'y'",
+    }
+    const result = applyOpsToText(used, [sibling, sync(true)])
+    expect(result).toContain("import { x } from 'y'")
+    expect(result).toContain('POST(request: Request)')
+  })
+
+  it('reports a required op whose parameter or function is gone (mode 7)', () => {
+    const renamed = used.replaceAll('request', 'req')
+    expect(() => applyOpsToText(renamed, [sync(true)])).toThrow(
+      RequiredOpMatchError
+    )
+    expect(() =>
+      applyOpsToText(used.replace('POST', 'GET'), [sync(true)])
+    ).toThrow(RequiredOpMatchError)
+  })
+
+  it('leaves a body that reads the prefixed name alone (mode 8)', () => {
+    const author = `export function POST(_request: Request) {
+  return _request.headers.has('x')
+}
+`
+    expect(applyOpsToText(author, [sync()])).toBe(author)
+  })
+})
+
+// removeJsxElement: the JSX comment documenting a removed element goes with
+// it for either element form (removing `<Studio>…</Studio>` once orphaned it).
+
+describe('removeJsxElement — adjacent comment cleanup', () => {
+  const fixture = (element: string) => `export function App() {
+  return (
+    <div>
+      {/* documents the target */}
+      ${element}
+      <span>keep</span>
+    </div>
+  )
+}
+`
+
+  const cases: { label: string; element: string; tagName: string }[] = [
+    { label: 'self-closing', element: '<Canvas root />', tagName: 'Canvas' },
+    {
+      label: 'self-closing in an expression container',
+      element: '{studio && <Canvas root />}',
+      tagName: 'Canvas',
+    },
+    {
+      label: 'open/close pair',
+      element: '<Studio>child</Studio>',
+      tagName: 'Studio',
+    },
+    {
+      label: 'open/close pair in an expression container',
+      element: '{studio && <Studio>child</Studio>}',
+      tagName: 'Studio',
+    },
+  ]
+
+  for (const { label, element, tagName } of cases) {
+    it(`removes the element and its comment (${label})`, () => {
+      const result = applyOpsToText(fixture(element), [
+        { kind: 'removeJsxElement', tagName },
+      ])
+
+      expect(result).not.toContain(tagName)
+      expect(result).not.toContain('documents the target')
+      expect(result).toContain('<span>keep</span>')
+    })
+  }
+
+  it('keeps the comment when the element is only unwrapped', () => {
+    const result = applyOpsToText(fixture('<Studio>child</Studio>'), [
+      { kind: 'removeJsxElement', tagName: 'Studio', unwrap: true },
+    ])
+
+    expect(result).not.toContain('<Studio>')
+    expect(result).toContain('child')
+    expect(result).toContain('documents the target')
+  })
+})
+
+describe('addImport', () => {
+  const canvasImport: AstOperation = {
+    kind: 'addImport',
+    text: "import { Canvas } from '@/webgl/components/canvas'",
+  }
+
+  it('should insert after the last import when absent', () => {
+    const fixture = `'use client'
+
+import { Lenis } from 'lenis/react'
+import { Theme } from '@/lib/theme'
+
+export function Wrapper() {
+  return null
+}
+`
+    const result = applyOpsToText(fixture, [canvasImport])
+
+    expect(result).toContain(
+      "import { Canvas } from '@/webgl/components/canvas'"
+    )
+    expect(result.indexOf("'@/lib/theme'")).toBeLessThan(
+      result.indexOf("'@/webgl/components/canvas'")
+    )
+    expect(result.indexOf("'@/webgl/components/canvas'")).toBeLessThan(
+      result.indexOf('export function Wrapper')
+    )
+    expect(applyOpsToText(result, [canvasImport])).toBe(result)
+  })
+
+  it('should insert after the directive prologue when the file has no imports', () => {
+    const fixture = `'use client'
+
+export function Thing() {
+  return null
+}
+`
+    const result = applyOpsToText(fixture, [canvasImport])
+
+    expect(result.indexOf("'use client'")).toBeLessThan(
+      result.indexOf('import { Canvas }')
+    )
+    expect(result.indexOf('import { Canvas }')).toBeLessThan(
+      result.indexOf('export function Thing')
+    )
+  })
+
+  it('should merge missing named imports into an existing declaration', () => {
+    const fixture = `import { Theme } from '@/lib/theme'
+
+export const t = Theme
+`
+    const result = applyOpsToText(fixture, [
+      {
+        kind: 'addImport',
+        text: "import { Theme, ThemeProvider } from '@/lib/theme'",
+      },
+    ])
+
+    expect(result).toContain('ThemeProvider')
+    expect(count(result, "from '@/lib/theme'")).toBe(1)
+    expect(count(result, 'import')).toBe(1)
+  })
+
+  it('should be an exact no-op when the import is already present', () => {
+    const fixture = `import { Canvas } from '@/webgl/components/canvas'
+
+export const c = Canvas
+`
+    expect(applyOpsToText(fixture, [canvasImport])).toBe(fixture)
+  })
+
+  it('should be an exact no-op for a multiline named import containing the binding', () => {
+    const fixture = `import {
+  Alpha,
+  Beta,
+} from '@/lib'
+
+export const x = Alpha + Beta
+`
+    const result = applyOpsToText(fixture, [
+      { kind: 'addImport', text: "import { Beta } from '@/lib'" },
+    ])
+    expect(result).toBe(fixture)
+  })
+
+  it('should merge into a multiline named import (formatting variant)', () => {
+    const fixture = `import {
+  Alpha,
+  Beta,
+} from '@/lib'
+
+export const x = Alpha + Beta
+`
+    const result = applyOpsToText(fixture, [
+      { kind: 'addImport', text: "import { Gamma } from '@/lib'" },
+    ])
+
+    expect(result).toContain('Gamma')
+    expect(count(result, "from '@/lib'")).toBe(1)
+    expect(result).toContain('Alpha')
+    expect(result).toContain('Beta')
+  })
+})
+
+describe('addArrayStringElement', () => {
+  const addLenis: AstOperation = {
+    kind: 'addArrayStringElement',
+    variableName: 'nextConfig',
+    propertyPath: 'experimental.optimizePackageImports',
+    value: 'lenis',
+  }
+
+  it('should append the string when absent', () => {
+    const result = applyOpsToText(nextConfigFixture, [addLenis])
+
+    expect(result).toContain("'lenis'")
+    expect(count(result, 'lenis')).toBe(1)
+    expect(result).toContain("'gsap'")
+    expect(result).toContain("'three'")
+    expect(applyOpsToText(result, [addLenis])).toBe(result)
+  })
+
+  it('should be an exact no-op when the value is already present', () => {
+    const result = applyOpsToText(nextConfigFixture, [
+      {
+        kind: 'addArrayStringElement',
+        variableName: 'nextConfig',
+        propertyPath: 'experimental.optimizePackageImports',
+        value: 'gsap',
+      },
+    ])
+    expect(result).toBe(nextConfigFixture)
+  })
+
+  it('should match across quote styles (exact no-op on double-quoted source)', () => {
+    const result = applyOpsToText(compactConfigFixture, [
+      {
+        kind: 'addArrayStringElement',
+        variableName: 'nextConfig',
+        propertyPath: 'experimental.optimizePackageImports',
+        value: 'gsap',
+      },
+    ])
+    expect(result).toBe(compactConfigFixture)
+  })
+
+  it('should append to a compact single-line array (formatting variant)', () => {
+    const result = applyOpsToText(compactConfigFixture, [addLenis])
+
+    expect(result).toContain('lenis')
+    expect(result).toContain('gsap')
+    expect(result).toContain('three')
+  })
+})
+
+describe('addArrayObjectElement', () => {
+  const addSanityPattern: AstOperation = {
+    kind: 'addArrayObjectElement',
+    variableName: 'nextConfig',
+    propertyPath: 'images.remotePatterns',
+    objectText: "{ protocol: 'https', hostname: 'cdn.sanity.io' }",
+    matchProperty: { name: 'hostname', value: 'cdn.sanity.io' },
+  }
+
+  it('should append the object when no element matches', () => {
+    const result = applyOpsToText(nextConfigFixture, [addSanityPattern])
+
+    expect(result).toContain('cdn.sanity.io')
+    expect(count(result, 'cdn.sanity.io')).toBe(1)
+    expect(result).toContain('cdn.shopify.com')
+    expect(applyOpsToText(result, [addSanityPattern])).toBe(result)
+  })
+
+  it('should be an exact no-op when a matching element is present', () => {
+    const result = applyOpsToText(nextConfigFixture, [
+      {
+        kind: 'addArrayObjectElement',
+        variableName: 'nextConfig',
+        propertyPath: 'images.remotePatterns',
+        objectText: "{ protocol: 'https', hostname: 'cdn.shopify.com' }",
+        matchProperty: { name: 'hostname', value: 'cdn.shopify.com' },
+      },
+    ])
+    expect(result).toBe(nextConfigFixture)
+  })
+
+  it('should normalize quoted keys (exact no-op on compact quoted-key source)', () => {
+    const result = applyOpsToText(compactConfigFixture, [
+      {
+        kind: 'addArrayObjectElement',
+        variableName: 'nextConfig',
+        propertyPath: 'images.remotePatterns',
+        objectText: "{ protocol: 'https', hostname: 'cdn.shopify.com' }",
+        matchProperty: { name: 'hostname', value: 'cdn.shopify.com' },
+      },
+    ])
+    expect(result).toBe(compactConfigFixture)
+  })
+
+  it('should append to a compact single-line array (formatting variant)', () => {
+    const result = applyOpsToText(compactConfigFixture, [addSanityPattern])
+
+    expect(result).toContain('cdn.sanity.io')
+    expect(result).toContain('cdn.shopify.com')
+  })
+})
+
+describe('addVariableStatement', () => {
+  const lazyCanvasStatement =
+    "const LazyWebGLCanvas = dynamic(() => import('@/webgl/components/canvas').then((m) => m.Canvas))"
+
+  const addLazyCanvas: AstOperation = {
+    kind: 'addVariableStatement',
+    name: 'LazyWebGLCanvas',
+    text: lazyCanvasStatement,
+  }
+
+  const featuresFixture = `'use client'
+
+import dynamic from 'next/dynamic'
+
+export function OptionalFeatures() {
+  return null
+}
+`
+
+  it('should insert after the last import when absent', () => {
+    const result = applyOpsToText(featuresFixture, [addLazyCanvas])
+
+    expect(result).toContain('const LazyWebGLCanvas')
+    expect(result.indexOf("'next/dynamic'")).toBeLessThan(
+      result.indexOf('const LazyWebGLCanvas')
+    )
+    expect(result.indexOf('const LazyWebGLCanvas')).toBeLessThan(
+      result.indexOf('export function OptionalFeatures')
+    )
+    expect(applyOpsToText(result, [addLazyCanvas])).toBe(result)
+  })
+
+  it('should be an exact no-op when the variable exists at top level', () => {
+    const fixture = `import dynamic from 'next/dynamic'
+
+const LazyWebGLCanvas = dynamic(() => import('@/webgl/components/canvas'))
+
+export function OptionalFeatures() {
+  return null
+}
+`
+    expect(applyOpsToText(fixture, [addLazyCanvas])).toBe(fixture)
+  })
+
+  it('should be an exact no-op when the variable exists in function scope (descendant scan)', () => {
+    const fixture = `export function OptionalFeatures() {
+  const LazyWebGLCanvas = null
+  return LazyWebGLCanvas
+}
+`
+    expect(applyOpsToText(fixture, [addLazyCanvas])).toBe(fixture)
+  })
+
+  it('should append at the end of the file when afterImports is false', () => {
+    const result = applyOpsToText(featuresFixture, [
+      { ...addLazyCanvas, afterImports: false },
+    ])
+
+    expect(result).toContain('const LazyWebGLCanvas')
+    expect(result.indexOf('export function OptionalFeatures')).toBeLessThan(
+      result.indexOf('const LazyWebGLCanvas')
+    )
+  })
+})
+
+describe('addJsxChild', () => {
+  const addCanvasChild: AstOperation = {
+    kind: 'addJsxChild',
+    parentTagName: 'div',
+    childText: '<Canvas root />',
+    childTagName: 'Canvas',
+  }
+
+  it('should append as the last child, matching sibling indentation', () => {
+    const fixture = `export function Wrapper({ children }) {
+  return (
+    <div>
+      <main>{children}</main>
+    </div>
+  )
+}
+`
+    const result = applyOpsToText(fixture, [addCanvasChild])
+
+    expect(result).toContain(
+      '      <main>{children}</main>\n      <Canvas root />\n    </div>'
+    )
+    expect(applyOpsToText(result, [addCanvasChild])).toBe(result)
+  })
+
+  it('should be an exact no-op when the child tag exists anywhere in the file', () => {
+    const fixture = `export function Wrapper({ children }) {
+  return (
+    <div>
+      <Canvas root />
+      <main>{children}</main>
+    </div>
+  )
+}
+`
+    expect(applyOpsToText(fixture, [addCanvasChild])).toBe(fixture)
+  })
+
+  it('should insert inline before the closing tag of a single-line parent (formatting variant)', () => {
+    const fixture = `export function Wrapper({ children }) {
+  return <div><main>{children}</main></div>
+}
+`
+    const result = applyOpsToText(fixture, [addCanvasChild])
+
+    expect(result).toContain('<main>{children}</main><Canvas root /></div>')
+  })
+
+  it('should indent one level past the closing tag when the parent has no element children', () => {
+    const fixture = `export function App() {
+  return (
+    <Layout>
+    </Layout>
+  )
+}
+`
+    const result = applyOpsToText(fixture, [
+      {
+        kind: 'addJsxChild',
+        parentTagName: 'Layout',
+        childText: '<Canvas root />',
+        childTagName: 'Canvas',
+      },
+    ])
+
+    expect(result).toContain(
+      '    <Layout>\n      <Canvas root />\n    </Layout>'
+    )
+  })
+})
+
+describe('addJsxChild (fragment parent)', () => {
+  const fragmentFixture = `export function OptionalFeatures() {
+  return (
+    <>
+      <GSAPRuntime />
+      {isDevelopment && <OrchestraTools />}
+    </>
+  )
+}
+`
+
+  const addLazyCanvas: AstOperation = {
+    kind: 'addJsxChild',
+    parentTagName: 'Fragment',
+    childText: '<LazyWebGLCanvas />',
+    childTagName: 'LazyWebGLCanvas',
+  }
+
+  it("targets the first JSX fragment when parentTagName is 'Fragment'", () => {
+    const result = applyOpsToText(fragmentFixture, [addLazyCanvas])
+
+    expect(result).toContain('<LazyWebGLCanvas />')
+    expect(result.indexOf('<OrchestraTools />')).toBeLessThan(
+      result.indexOf('<LazyWebGLCanvas />')
+    )
+    expect(result.indexOf('<LazyWebGLCanvas />')).toBeLessThan(
+      result.indexOf('</>')
+    )
+    expect(applyOpsToText(result, [addLazyCanvas])).toBe(result)
+  })
+
+  it('inserts a JSX expression child into a fragment', () => {
+    const fixture = `export function OrchestraTools() {
+  return (
+    <>
+      <Cmdo />
+      {stats && <Stats />}
+    </>
+  )
+}
+`
+    const op: AstOperation = {
+      kind: 'addJsxChild',
+      parentTagName: 'Fragment',
+      childText: '{studio && <Studio />}',
+      childTagName: 'Studio',
+    }
+    const result = applyOpsToText(fixture, [op])
+
+    expect(result).toContain('{studio && <Studio />}')
+    expect(result.indexOf('{stats && <Stats />}')).toBeLessThan(
+      result.indexOf('{studio && <Studio />}')
+    )
+    expect(applyOpsToText(result, [op])).toBe(result)
+  })
+
+  it('is a no-op when the file has no fragment and no matching element', () => {
+    const fixture = `export function Thing() {
+  return <div>content</div>
+}
+`
+    expect(applyOpsToText(fixture, [addLazyCanvas])).toBe(fixture)
+  })
+})
+
+describe('addJsxChild (childAttribute disambiguation + sibling-aware parent)', () => {
+  const togglesFixture = `export function Cmdo() {
+  return (
+    <div id="orchestra">
+      <Backdrop />
+      <div className="row">
+        <OrchestraToggle id="grid">G</OrchestraToggle>
+        <OrchestraToggle id="stats">S</OrchestraToggle>
+      </div>
+    </div>
+  )
+}
+`
+
+  const addWebglToggle: AstOperation = {
+    kind: 'addJsxChild',
+    parentTagName: 'div',
+    childText: '<OrchestraToggle id="webgl">W</OrchestraToggle>',
+    childTagName: 'OrchestraToggle',
+    childAttribute: { name: 'id', value: 'webgl' },
+  }
+
+  it('inserts next to same-tag siblings (not into the first tag match)', () => {
+    const result = applyOpsToText(togglesFixture, [addWebglToggle])
+
+    expect(result).toContain('id="webgl"')
+    // Placed after the existing toggles…
+    expect(result.indexOf('id="stats"')).toBeLessThan(
+      result.indexOf('id="webgl"')
+    )
+    // …and inside the inner row div (before its closing tag), not appended
+    // to the outer `<div id="orchestra">`.
+    expect(result.indexOf('id="webgl"')).toBeLessThan(result.indexOf('</div>'))
+    expect(applyOpsToText(result, [addWebglToggle])).toBe(result)
+  })
+
+  it('same-tag siblings with different attributes do not block insertion', () => {
+    // Without childAttribute the existing OrchestraToggles would no-op the
+    // add; with it, only an id="webgl" match blocks.
+    const result = applyOpsToText(togglesFixture, [addWebglToggle])
+    expect(count(result, '<OrchestraToggle')).toBe(3)
+  })
+
+  it('is an exact no-op when the matching attribute already exists', () => {
+    const blocked = applyOpsToText(togglesFixture, [
+      {
+        kind: 'addJsxChild',
+        parentTagName: 'div',
+        childText: '<OrchestraToggle id="grid">G</OrchestraToggle>',
+        childTagName: 'OrchestraToggle',
+        childAttribute: { name: 'id', value: 'grid' },
+      },
+    ])
+    expect(blocked).toBe(togglesFixture)
+  })
+})
+
+describe('Round Trips (remove + add)', () => {
+  const nextConfigRealistic = `import type { NextConfig } from 'next'
+
+const nextConfig: NextConfig = {
+  experimental: {
+    optimizePackageImports: [
+      '@react-three/drei',
+      '@react-three/fiber',
+      'gsap',
+      'three',
+    ],
+  },
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'cdn.shopify.com',
+      },
+      {
+        protocol: 'https',
+        hostname: 'cdn.sanity.io',
+      },
+    ],
+  },
+}
+
+export default nextConfig
+`
+
+  it('remove then add string element leaves the value present exactly once', () => {
+    const result = applyOpsToText(nextConfigRealistic, [
+      {
+        kind: 'removeArrayStringElement',
+        variableName: 'nextConfig',
+        propertyPath: 'experimental.optimizePackageImports',
+        value: 'gsap',
+      },
+      {
+        kind: 'addArrayStringElement',
+        variableName: 'nextConfig',
+        propertyPath: 'experimental.optimizePackageImports',
+        value: 'gsap',
+      },
+    ])
+
+    expect(count(result, "'gsap'")).toBe(1)
+    expect(count(result, "'three'")).toBe(1)
+    expect(count(result, '@react-three/drei')).toBe(1)
+  })
+
+  it('add then remove string element leaves the original array intact', () => {
+    const result = applyOpsToText(nextConfigRealistic, [
+      {
+        kind: 'addArrayStringElement',
+        variableName: 'nextConfig',
+        propertyPath: 'experimental.optimizePackageImports',
+        value: 'lenis',
+      },
+      {
+        kind: 'removeArrayStringElement',
+        variableName: 'nextConfig',
+        propertyPath: 'experimental.optimizePackageImports',
+        value: 'lenis',
+      },
+    ])
+
+    expect(result).not.toContain('lenis')
+    expect(count(result, "'gsap'")).toBe(1)
+    expect(count(result, "'three'")).toBe(1)
+    expect(count(result, '@react-three/drei')).toBe(1)
+    expect(count(result, '@react-three/fiber')).toBe(1)
+  })
+
+  it('remove then add object element leaves the element present exactly once', () => {
+    const result = applyOpsToText(nextConfigRealistic, [
+      {
+        kind: 'removeArrayObjectElement',
+        variableName: 'nextConfig',
+        propertyPath: 'images.remotePatterns',
+        matchProperty: { name: 'hostname', value: 'cdn.sanity.io' },
+      },
+      {
+        kind: 'addArrayObjectElement',
+        variableName: 'nextConfig',
+        propertyPath: 'images.remotePatterns',
+        objectText: "{ protocol: 'https', hostname: 'cdn.sanity.io' }",
+        matchProperty: { name: 'hostname', value: 'cdn.sanity.io' },
+      },
+    ])
+
+    expect(count(result, 'cdn.sanity.io')).toBe(1)
+    expect(count(result, 'cdn.shopify.com')).toBe(1)
+  })
+
+  it('add then remove object element leaves the original patterns intact', () => {
+    const result = applyOpsToText(nextConfigRealistic, [
+      {
+        kind: 'addArrayObjectElement',
+        variableName: 'nextConfig',
+        propertyPath: 'images.remotePatterns',
+        objectText: "{ protocol: 'https', hostname: 'images.ctfassets.net' }",
+        matchProperty: { name: 'hostname', value: 'images.ctfassets.net' },
+      },
+      {
+        kind: 'removeArrayObjectElement',
+        variableName: 'nextConfig',
+        propertyPath: 'images.remotePatterns',
+        matchProperty: { name: 'hostname', value: 'images.ctfassets.net' },
+      },
+    ])
+
+    expect(result).not.toContain('images.ctfassets.net')
+    expect(count(result, 'cdn.shopify.com')).toBe(1)
+    expect(count(result, 'cdn.sanity.io')).toBe(1)
+  })
+
+  it('remove then add import leaves the declaration present exactly once', () => {
+    const result = applyOpsToText(nextConfigRealistic, [
+      { kind: 'removeImport', specifier: 'next' },
+      {
+        kind: 'addImport',
+        text: "import type { NextConfig } from 'next'",
+      },
+    ])
+
+    expect(count(result, "from 'next'")).toBe(1)
+    expect(result).toContain('NextConfig')
+  })
+})
+
+// applyCodeTransforms with a missing target file (issue #381): it once
+// skipped a nonexistent file instead of failing a `required: true` op, which
+// defeats `required`.
+
+describe('applyCodeTransforms — missing target file (issue #381)', () => {
+  const missingFile = 'lib/scripts/__fixtures__/does-not-exist.ts'
+
+  it('throws RequiredOpMatchError when a required op targets a nonexistent file', async () => {
+    await expect(
+      applyCodeTransforms(
+        [
+          {
+            file: missingFile,
+            ops: [
+              {
+                kind: 'removeVariableStatement',
+                name: 'doesNotMatter',
+                required: true,
+              },
+            ],
+          },
+        ],
+        true // dryRun — no writes either way, the file doesn't exist
+      )
+    ).rejects.toThrow(RequiredOpMatchError)
+  })
+
+  it('a transform with no required ops still silently skips a missing file (legacy semantics preserved)', async () => {
+    const result = await applyCodeTransforms(
+      [
+        {
+          file: missingFile,
+          ops: [{ kind: 'removeVariableStatement', name: 'doesNotMatter' }],
+        },
+      ],
+      true
+    )
+    expect(result).toEqual({ changes: 0, changedFiles: [], failures: [] })
+  })
+})
+
+// Failure modes: removal drops the wrong binding or touches a destructuring of
+// another initializer; removal stops at an earlier matching pattern that lacks
+// the binding; add edits a later pattern instead of the first match; either op
+// is not idempotent; a required removal with no matching destructuring passes
+// silently.
+describe('destructured bindings', () => {
+  const remove: AstOperation = {
+    kind: 'removeDestructuredBinding',
+    bindingName: 'stats',
+    initializerContains: 'useOrchestra',
+  }
+  const add: AstOperation = {
+    kind: 'addDestructuredBinding',
+    bindingName: 'stats',
+    initializerContains: 'useOrchestra',
+  }
+
+  it('removes only the named binding from the matching destructuring', () => {
+    const fixture = `const { stats } = useMetrics()\nconst { studio, stats, grid } = useOrchestra()\n`
+    const result = applyOpsToText(fixture, [remove])
+    expect(result).toContain('const { stats } = useMetrics()')
+    expect(result).toContain('const { studio, grid } = useOrchestra()')
+    expect(applyOpsToText(result, [remove])).toBe(result)
+  })
+
+  it('removes from a later destructuring when the first match lacks the binding', () => {
+    const fixture = `const { studio } = useOrchestra()\nconst { grid, stats } = useOrchestra()\n`
+    const result = applyOpsToText(fixture, [remove])
+    expect(result).toContain('const { studio } = useOrchestra()')
+    expect(result).toContain('const { grid } = useOrchestra()')
+  })
+
+  it('adds to the first matching destructuring only, and is idempotent', () => {
+    const fixture = `const { studio } = useOrchestra()\nconst { grid } = useOrchestra()\n`
+    const result = applyOpsToText(fixture, [add])
+    expect(result).toContain('const { studio, stats } = useOrchestra()')
+    expect(result).toContain('const { grid } = useOrchestra()')
+    expect(applyOpsToText(result, [add])).toBe(result)
+  })
+
+  it('leaves the file unchanged when the first match already has the binding', () => {
+    const fixture = `const { stats } = useOrchestra()\nconst { grid } = useOrchestra()\n`
+    expect(applyOpsToText(fixture, [add])).toBe(fixture)
+  })
+
+  it('round-trips remove then add', () => {
+    const fixture = `const { studio, stats } = useOrchestra()\n`
+    const removed = applyOpsToText(fixture, [remove])
+    expect(removed).not.toContain('stats')
+    expect(applyOpsToText(removed, [add])).toBe(fixture)
+  })
+
+  it('throws for a required removal when no destructuring matches', () => {
+    const fixture = `const orchestra = useOrchestra()\n`
+    expect(() =>
+      applyOpsToText(fixture, [{ ...remove, required: true }])
+    ).toThrow(RequiredOpMatchError)
+  })
+})

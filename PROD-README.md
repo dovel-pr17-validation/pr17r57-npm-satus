@@ -1,0 +1,82 @@
+# [PROJECT NAME]
+
+## Quick Start
+
+```bash
+bun install
+bun dev
+```
+
+Before `bun dev`, put the line `DOTENV_PRIVATE_KEY="..."` (handed over with the project) in a file called `.env.keys` at the repo root. `bun run doctor` checks it worked.
+
+## Environment variables
+
+Env vars live in the repo as one encrypted `.env` file. The private key above decrypts it; keep it out of git and out of chat tools.
+
+- Change or add a value: `bun dotenvx set KEY "value"`, then commit `.env`.
+- Read a value: `bun dotenvx get KEY`.
+- Vercel needs only the private keys: `DOTENV_PRIVATE_KEY`, plus `DOTENV_PRIVATE_KEY_PRODUCTION` once there's a `.env.production`. Set them as Secrets for Production and Preview. Don't add other variables in the Vercel dashboard: they override the file.
+
+## Scripts
+
+| Command            | Description                                                                           |
+| ------------------ | ------------------------------------------------------------------------------------- |
+| `bun dev`          | Development server                                                                    |
+| `bun run build`    | Production build                                                                      |
+| `bun lint`         | Run linter                                                                            |
+| `bun run check`    | Lint, format check, type-aware lint, typecheck, unit tests, manifest and asset checks |
+| `bun setup:styles` | Regenerate CSS                                                                        |
+
+## Tech Stack
+
+Next.js 16, React 19, TypeScript, Tailwind CSS v4, Bun
+
+## Project Structure
+
+```
+app/                    # Next.js routes; llms.txt/, agent-content/, sitemap.ts, robots.ts, and manifest.ts (AEO surfaces) live at the app/ root
+components/             # UI components
+lib/                    # Everything non-UI
+  ├── hooks/           # Custom React hooks
+  ├── integrations/    # Third-party services (Sanity, Shopify, HubSpot, Mailchimp, Turnstile)
+  ├── features/        # Feature flags gating opt-in surfaces (e.g. WebGL)
+  ├── webgl/           # 3D graphics (optional, behind lib/features)
+  ├── seo/             # Sitemap, robots, and metadata helpers
+  ├── utils/           # Pure utilities
+  ├── scripts/         # CLI tools
+  ├── styles/          # Design system, Tailwind config
+  └── dev/             # Debug tools
+```
+
+## Content Management
+
+If the Sanity integration is enabled, manage content at [sanity.io/manage](https://sanity.io/manage) or through your project's Sanity Studio.
+
+Content updates publish through webhooks (Sanity publish, Shopify product/collection updates), which call `POST /api/revalidate`. To trigger it by hand, save the product or collection again in Shopify Admin, or re-publish the document in Sanity Studio. Both providers sign their requests, so a hand-made `curl` is rejected. GET is not supported.
+
+## Error reporting
+
+Every server error writes one JSON line to the server log (on Vercel, the Logs tab): the error message and stack, its digest (the ID Next gives the error), the path without its query string, and the route. To also send each one to an error or logging service, point `ERROR_REPORT_URL` at that service's HTTP ingest endpoint:
+
+```bash
+bun dotenvx set ERROR_REPORT_URL "https://ingest.example.com/your-endpoint"
+bun dotenvx set ERROR_REPORT_TOKEN "..." # only if the endpoint wants Authorization: Bearer
+```
+
+Each error is POSTed as that same JSON. Headers, cookies and request bodies are never sent. If the service is down or takes longer than 3 seconds, the report is dropped and a warning is logged; the visitor still gets the error page. For a service that needs its own SDK, such as Sentry, replace `instrumentation.ts` with the SDK's setup.
+
+## Deployment
+
+Vercel deploys automatically on every push to `main`. If the project isn't linked yet, run `vercel link` once first (see Quick Start).
+
+## Troubleshooting
+
+| Issue               | Solution                                           |
+| ------------------- | -------------------------------------------------- |
+| Build fails         | `bun install` + `bun run doctor` (is the key set?) |
+| Styles not updating | `bun setup:styles` + restart                       |
+| CMS not connecting  | Check Sanity env vars + CORS                       |
+
+---
+
+Built with [Satūs](https://github.com/darkroomengineering/satus) by [darkroom.engineering](https://darkroom.engineering)

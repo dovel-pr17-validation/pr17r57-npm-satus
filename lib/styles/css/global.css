@@ -1,0 +1,194 @@
+html {
+  scrollbar-gutter: stable;
+}
+
+* {
+  scrollbar-width: thin;
+}
+
+/*
+ * Surfaces and lines derive from the active theme via color-mix, so they adapt
+ * to every [data-theme] without new palette entries. The red `--color-contrast`
+ * doubles as the accent.
+ */
+:root {
+  --surface: color-mix(
+    in oklab,
+    var(--color-secondary) 4%,
+    var(--color-primary)
+  );
+  --surface-2: color-mix(
+    in oklab,
+    var(--color-secondary) 8%,
+    var(--color-primary)
+  );
+  --line: color-mix(in oklab, var(--color-secondary) 14%, transparent);
+  --line-strong: color-mix(in oklab, var(--color-secondary) 28%, transparent);
+
+  --duration-fast: 200ms;
+  --duration: 400ms;
+  --duration-slow: 800ms;
+}
+
+html.overflow-hidden {
+  overflow: hidden;
+  touch-action: none;
+}
+
+body {
+  min-height: 100svh;
+  overscroll-behavior: none;
+  background-color: var(--color-primary);
+  color: var(--color-secondary);
+  display: flex;
+  flex-direction: column;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+*::selection {
+  background-color: var(--color-contrast);
+  color: var(--color-primary);
+}
+
+svg.icon {
+  path[fill],
+  rect[fill],
+  circle[fill] {
+    fill: currentColor;
+  }
+  path[stroke],
+  rect[stroke],
+  circle[stroke] {
+    stroke: currentColor;
+  }
+}
+
+.link {
+  @media (--hover) {
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+}
+
+*:focus-visible {
+  outline: 2px solid var(--color-contrast);
+  outline-offset: 2px;
+  border-radius: 1px;
+}
+
+html.scrollbar-grabbing,
+img {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  user-select: none;
+}
+
+button {
+  cursor: pointer;
+  /* Fix vertical text centering by trimming font metric space */
+  text-box-trim: both;
+  text-box-edge: cap alphabetic;
+  user-select: none;
+}
+
+html.screenshot {
+  *:not(:has(canvas), canvas, :has(#orchestra), #orchestra, #orchestra *) {
+    opacity: 0 !important;
+  }
+}
+
+/*
+ * Paired with `useReveal`, which toggles [data-reveal] hidden→visible on a
+ * container and indexes [data-reveal-item] children via --reveal-index. Only
+ * transform + opacity animate, so it runs on the compositor thread, unaffected
+ * by hydration. Scoped under [data-reveal], which appears only once JS runs, so
+ * content is visible with JS off. Per-container knobs:
+ *   --reveal-transform : hidden-state offset (default translateY(16px))
+ *   --reveal-stagger   : delay step between items (default 60ms)
+ *   --reveal-duration  : per-item duration (default 700ms)
+ * The stagger delay caps at 600ms so items deep in a long list do not wait
+ * seconds to appear.
+ */
+[data-reveal] [data-reveal-item] {
+  opacity: 0;
+  transform: var(--reveal-transform, translateY(16px));
+  transition: opacity var(--reveal-duration, 700ms) var(--ease-out-expo);
+  transition-delay: min(
+    calc(var(--reveal-index, 0) * var(--reveal-stagger, 60ms)),
+    600ms
+  );
+
+  @media (--motion-ok) {
+    transition:
+      opacity var(--reveal-duration, 700ms) var(--ease-out-expo),
+      transform var(--reveal-duration, 700ms) var(--ease-out-expo);
+    transition-delay: min(
+      calc(var(--reveal-index, 0) * var(--reveal-stagger, 60ms)),
+      600ms
+    );
+  }
+}
+
+[data-reveal='visible'] [data-reveal-item] {
+  opacity: 1;
+  transform: none;
+}
+
+/* React owns the snapshots; global chrome stays outside the page crossfade.
+ * Opacity only, no group geometry animation. */
+::view-transition {
+  pointer-events: none;
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+}
+
+::view-transition-group(.page-transition),
+::view-transition-group(.content-reveal) {
+  animation: none;
+}
+
+::view-transition-old(.page-transition),
+::view-transition-old(.content-reveal) {
+  animation: page-fade-out 150ms ease-out both;
+}
+
+::view-transition-new(.page-transition),
+::view-transition-new(.content-reveal) {
+  animation: page-fade-in 150ms ease-out both;
+}
+
+@keyframes page-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes page-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/*
+ * Reduced motion: movement off, fades stay. Components declare transform,
+ * height, width and clip-path transitions inside `@media (--motion-ok)`; the view
+ * transition crossfade and reveal fade are opacity-only and keep running.
+ * anime.js and WebGL gate themselves via usePreferredReducedMotion().
+ */
+@media (--reduced-motion) {
+  * {
+    scroll-behavior: auto;
+  }
+}

@@ -1,0 +1,81 @@
+import { defineQuery } from 'next-sanity'
+
+const richTextWithLinks = `
+  content[]{
+    ...,
+    markDefs[]{
+      ...,
+      _type == "link" => {
+        ...,
+        internalLink->{_type, slug, title}
+      }
+    }
+  }
+`
+
+const linkWithLabel = `
+  link {
+    ...,
+    internalLink->{_type, slug, title}
+  }
+`
+
+export const pageQuery = defineQuery(`
+  *[_type == "page" && slug.current == $slug][0] {
+    _id,
+    title,
+    slug,
+    ${richTextWithLinks},
+    ${linkWithLabel},
+    metadata{
+      ...,
+      image{
+        ...,
+        asset->{url}
+      }
+    },
+    publishedAt,
+    _updatedAt
+  }
+`)
+
+// Existence check only, so a page can call `notFound()` before it opens a
+// Suspense boundary (see the Sanity example page).
+export const pageExistsQuery = defineQuery(`
+  defined(*[_type == "page" && slug.current == $slug][0]._id)
+`)
+
+export const articleQuery = defineQuery(`
+  *[_type == "article" && slug.current == $slug][0] {
+    _id,
+    title,
+    slug,
+    excerpt,
+    featuredImage,
+    ${richTextWithLinks},
+    categories,
+    tags,
+    author,
+    publishedAt,
+    metadata{
+      ...,
+      image{
+        ...,
+        asset->{url}
+      }
+    },
+    _updatedAt
+  }
+`)
+
+export const allArticlesQuery = defineQuery(`
+  *[_type == "article"] | order(publishedAt desc) {
+    _id,
+    title,
+    slug,
+    excerpt,
+    featuredImage,
+    categories,
+    publishedAt
+  }
+`)

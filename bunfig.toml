@@ -1,0 +1,19 @@
+# Next loads env files itself, through @dotenvx/next-env, which decrypts them.
+# Bun's own loader would set the still-encrypted values first, and Next never
+# overwrites a variable that is already set.
+env = false
+
+[test]
+preload = ["./lib/scripts/test-setup.ts"]
+
+[install]
+# Install only package versions published at least 3 days ago (259200 s).
+# A compromised release is usually pulled within hours, so this keeps one out
+# of the lockfile. Dependabot's `cooldown` in .github/dependabot.yml matches
+# it, so version-update PRs never ask for a version Bun would refuse.
+# Cost: Dependabot security updates ignore the cooldown, so a fix published
+# less than 3 days ago fails `bun install`; add that package to
+# `minimumReleaseAgeExcludes` until it ages past the window, then remove it.
+minimumReleaseAge = 259200
+# SHORTCUT: hamo 1.0.4 published 2026-11-10T16:56Z from darkroomengineering/hamo's own release workflow; satus needs its Lenis 2 peer range (OSS-186). ceiling: skips the age guard for hamo only. upgrade: remove after 2026-11-13T16:56Z.
+minimumReleaseAgeExcludes = ["hamo"]

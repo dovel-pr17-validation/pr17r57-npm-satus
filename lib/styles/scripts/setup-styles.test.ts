@@ -1,0 +1,90 @@
+/**
+ * Guards the generated stylesheets against drift. `lib/styles/css/tailwind.css`
+ * and `root.css` are built from `colors.ts` and `lib/styles/config.ts`; a stale
+ * copy still compiles and renders the old palette. These tests rebuild in memory
+ * and compare with the committed files.
+ *
+ * On failure: run `bun run setup:styles` and commit the regenerated files.
+ */
+
+import { describe, expect, it } from 'bun:test'
+import { join } from 'node:path'
+
+import { Glob } from 'bun'
+
+import { colors } from '../config'
+import { buildStyleSheets, OUTPUTS } from './setup-styles'
+
+const DECLARATION = /^\s*(?<property>[a-z-]+)\s*:\s*(?<value>[^;]+);/gim
+
+const COLOR_PROPERTY =
+  /^(color|background|background-color|border|border-[a-z]+|border-[a-z]+-color|outline|outline-color|fill|stroke|box-shadow|text-shadow|text-decoration-color|caret-color|accent-color|column-rule-color)$/
+
+/** CSS named colours. `transparent` and `currentColor` are deliberately absent. */
+const NAMED_COLOR =
+  /\b(aliceblue|antiquewhite|aqua|aquamarine|azure|beige|bisque|black|blanchedalmond|blue|blueviolet|brown|burlywood|cadetblue|chartreuse|chocolate|coral|cornflowerblue|cornsilk|crimson|cyan|darkblue|darkcyan|darkgoldenrod|darkgray|darkgreen|darkgrey|darkkhaki|darkmagenta|darkolivegreen|darkorange|darkorchid|darkred|darksalmon|darkseagreen|darkslateblue|darkslategray|darkslategrey|darkturquoise|darkviolet|deeppink|deepskyblue|dimgray|dimgrey|dodgerblue|firebrick|floralwhite|forestgreen|fuchsia|gainsboro|ghostwhite|gold|goldenrod|gray|green|greenyellow|grey|honeydew|hotpink|indianred|indigo|ivory|khaki|lavender|lavenderblush|lawngreen|lemonchiffon|lightblue|lightcoral|lightcyan|lightgoldenrodyellow|lightgray|lightgreen|lightgrey|lightpink|lightsalmon|lightseagreen|lightskyblue|lightslategray|lightslategrey|lightsteelblue|lightyellow|lime|limegreen|linen|magenta|maroon|mediumaquamarine|mediumblue|mediumorchid|mediumpurple|mediumseagreen|mediumslateblue|mediumspringgreen|mediumturquoise|mediumvioletred|midnightblue|mintcream|mistyrose|moccasin|navajowhite|navy|oldlace|olive|olivedrab|orange|orangered|orchid|palegoldenrod|palegreen|paleturquoise|palevioletred|papayawhip|peachpuff|peru|pink|plum|powderblue|purple|rebeccapurple|rosybrown|royalblue|saddlebrown|salmon|sandybrown|seagreen|seashell|sienna|silver|skyblue|slateblue|slategray|slategrey|snow|springgreen|steelblue|tan|teal|thistle|tomato|turquoise|violet|wheat|white|whitesmoke|yellow|yellowgreen)\b/i
+
+const repoRoot = join(import.meta.dir, '..', '..', '..')
+const built = buildStyleSheets()
+
+const readCommitted = (path: string) => Bun.file(join(repoRoot, path)).text()
+
+describe('generated stylesheets', () => {
+  it('tailwind.css matches a fresh build of the current config', async () => {
+    expect(await readCommitted(OUTPUTS.tailwind)).toBe(built.tailwind)
+  })
+
+  it('root.css matches a fresh build of the current config', async () => {
+    expect(await readCommitted(OUTPUTS.root)).toBe(built.root)
+  })
+})
+
+describe('color authoring rules', () => {
+  // AGENTS.md: colors are always oklch, mixing is always oklab. Hex and rgb()
+  // survive the generator unnoticed, so the palette is checked at its source.
+  it('authors every palette value in oklch', () => {
+    for (const [name, value] of Object.entries(colors)) {
+      expect(`${name}: ${value}`).toMatch(/: oklch\(/)
+    }
+  })
+
+  it('never emits hex, rgb, or hsl colors', () => {
+    for (const css of [built.tailwind, built.root]) {
+      expect(css).not.toMatch(/#[0-9a-f]{3,8}\b/i)
+      expect(css).not.toMatch(/\b(rgba?|hsla?)\(/i)
+    }
+  })
+
+  // Hand-written modules are where a stray `background: pink` lands, so scan
+  // them too, including CSS named colours that survive a hex/rgb grep.
+  it('authors every colour in hand-written CSS as oklch', async () => {
+    const offenders: string[] = []
+
+    for await (const path of new Glob('{app,components,lib}/**/*.css').scan(
+      repoRoot
+    )) {
+      const css = await Bun.file(join(repoRoot, path)).text()
+
+      for (const { groups } of css.matchAll(DECLARATION)) {
+        const property = groups?.property
+        const rawValue = groups?.value
+        if (!(property && rawValue && COLOR_PROPERTY.test(property))) continue
+
+        // `var()` and `url()` payloads are references, not authored colours.
+        const value = rawValue
+          .replace(/var\([^)]*\)/g, '')
+          .replace(/url\([^)]*\)/g, '')
+
+        if (
+          NAMED_COLOR.test(value) ||
+          /#[0-9a-f]{3,8}\b/i.test(value) ||
+          /\b(rgba?|hsla?)\(/i.test(value)
+        ) {
+          offenders.push(`${path}: ${property}: ${rawValue.trim()}`)
+        }
+      }
+    }
+
+    expect(offenders).toEqual([])
+  })
+})

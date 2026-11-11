@@ -1,0 +1,57 @@
+# App Directory
+
+Next.js App Router pages and routes.
+
+## Structure
+
+```
+app/
+├── layout.tsx            # Bare html/body shell shared with /studio
+├── global-error.tsx      # Root-level error boundary (wraps html+body)
+├── not-found.tsx         # Bare-shell 404 for routes outside (site), e.g. /studio
+├── manifest.ts           # Web app manifest
+├── robots.ts             # robots.txt
+├── sitemap.ts            # sitemap.xml
+├── llms.txt/             # /llms.txt route
+├── agent-content/        # /agent-content route
+├── icon.png, apple-icon.png, opengraph-image.jpg, twitter-image.jpg
+├── (site)/               # Site routes with app providers; /studio, /api and the machine-readable routes live outside
+│   ├── layout.tsx        # App providers, metadata, analytics
+│   ├── page.tsx          # Manual / in-app documentation landing page
+│   ├── error.tsx         # Error boundary (thin wrapper over components/ui/error-view)
+│   ├── not-found.tsx     # 404 page
+│   ├── ai/                # /ai route
+│   ├── articles/[slug]/   # Sanity article pages
+│   ├── [...slug]/         # Catch-all: renders one-segment Sanity pages by slug, 404 otherwise
+│   └── (examples)/       # Worked examples for contributors; setup:project deletes the group
+│       ├── sanity/       # Sanity wiring tutorial
+│       └── webgl/        # WebGL follows CSS: cubes on CSS-laid-out boxes, scroll + parallax
+├── api/
+│   ├── cart/ensure/      # Shopify: idempotently ensures a cart cookie exists
+│   ├── draft-mode/       # Sanity draft mode (enable/disable)
+│   └── revalidate/       # Webhook endpoint
+└── studio/               # Sanity Studio — inherits only the bare root shell
+```
+
+There is no `loading.tsx` in `(site)/`, on purpose. A loading file wraps
+every page below it in a Suspense boundary, so the response starts streaming
+with a 200 status before the page runs, and a `notFound()` in that page can
+only add a noindex tag, not the 404 status. Every dynamic page here can call
+`notFound()` (`[...slug]` for any unmatched URL, `articles/[slug]` for a slug
+with no document), so each would soft-404 with one. Cost: clicking a link to a
+dynamic route shows nothing new until the server has rendered it. An in-page
+`<Suspense>` has the same effect on any `notFound()` beneath it, so a page that
+wants a skeleton runs its `notFound()` checks first and opens the boundary
+after them: the Sanity example awaits a cheap existence query, then streams the
+full document inside `<Suspense>`. `e2e/not-found.e2e.ts` fails if the status
+regresses.
+
+The root layout stays a bare shell on purpose: anything added to it is a
+deliberate decision to ship it to `/studio` too. App-flavored concerns
+(providers, metadata, analytics) belong in `app/(site)/layout.tsx`.
+
+API surface (endpoints, webhooks): [app/api/README.md](api/README.md).
+
+## Pages
+
+Add routes as folders with `page.tsx` inside `(site)/`, wrapped in `<Wrapper>` (props: [components/layout/README.md](../components/layout/README.md#wrapper-props)). Server Components by default; colocate page-only components in `_components/`; use route groups `(folder)` for organization.

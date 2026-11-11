@@ -1,0 +1,11 @@
+@layer components {
+  .accordion {
+    .body {
+      overflow: hidden;
+      @media (--motion-ok) {
+        /* Height, not transform: the panel must push the content below it. */
+        transition: height 300ms var(--ease-out-expo);
+      }
+    }
+  }
+}

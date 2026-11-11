@@ -1,0 +1,88 @@
+@layer components {
+  .list {
+    display: flex;
+    gap: mobile-vw(4px);
+    border-bottom: 1px solid var(--color-secondary);
+    padding-bottom: mobile-vw(1px);
+    position: relative;
+
+    @media (--desktop) {
+      gap: desktop-vw(4px);
+      padding-bottom: desktop-vw(1px);
+    }
+  }
+
+  .tab {
+    min-width: 44px;
+    min-height: 44px;
+    padding: mobile-vw(8px) mobile-vw(16px);
+    background: transparent;
+    border: none;
+    color: var(--color-secondary);
+    cursor: pointer;
+    font-size: inherit;
+    font-family: inherit;
+    transition: opacity var(--duration-fast) ease;
+    position: relative;
+
+    @media (--desktop) {
+      padding: desktop-vw(8px) desktop-vw(16px);
+    }
+
+    @media (--hover) {
+      &:hover {
+        opacity: 0.8;
+      }
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--color-contrast);
+      outline-offset: 2px;
+    }
+
+    &[data-active] {
+      opacity: 1;
+      color: var(--color-contrast);
+    }
+
+    /* Opacity, not scale: the indicator measures the active tab's rect. */
+    &:active {
+      opacity: 0.6;
+    }
+
+    &[data-disabled] {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+  }
+
+  .indicator {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: var(--active-tab-width);
+    height: 2px;
+    translate: var(--active-tab-left);
+    background-color: var(--color-contrast);
+
+    @media (--motion-ok) {
+      /* Width tracks tabs of different lengths; it lays out one 2px bar only. */
+      transition:
+        translate var(--duration-fast) var(--ease-out-quint),
+        width var(--duration-fast) var(--ease-out-quint);
+    }
+  }
+
+  .panel {
+    padding: mobile-vw(16px) 0;
+
+    @media (--desktop) {
+      padding: desktop-vw(16px) 0;
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--color-contrast);
+      outline-offset: 2px;
+    }
+  }
+}

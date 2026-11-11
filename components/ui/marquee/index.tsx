@@ -1,0 +1,141 @@
+'use client'
+
+import cn from 'clsx'
+import { useIntersectionObserver, useResizeObserver } from 'hamo'
+import { useLenis } from 'lenis/react'
+import { type HTMLAttributes, useId, useRef } from 'react'
+import { useTempus } from 'tempus/react'
+
+import { usePreferredReducedMotion } from '@/hooks/use-sync-external'
+import { modulo } from '@/utils/math'
+
+import s from './marquee.module.css'
+
+function getHash(input: string) {
+  let hash = 0
+
+  for (let i = 0; i < input.length; i++) {
+    hash = (hash << 5) - hash + input.charCodeAt(i)
+    hash |= 0 // to 32bit integer
+  }
+  return hash
+}
+
+interface MarqueeProps extends HTMLAttributes<HTMLElement> {
+  repeat?: number
+  speed?: number
+  scrollVelocity?: boolean
+  reversed?: boolean
+  pauseOnHover?: boolean
+}
+
+export function Marquee({
+  children,
+  className,
+  repeat = 2,
+  speed = 1,
+  scrollVelocity = true,
+  reversed = false,
+  pauseOnHover = false,
+  onPointerEnter,
+  onPointerLeave,
+  ...props
+}: MarqueeProps) {
+  const [setRectRef, getEntry] = useResizeObserver({
+    lazy: true,
+  })
+
+  const id = useId()
+
+  const elementsRef = useRef<(HTMLDivElement | undefined)[]>([])
+  const transformRef = useRef(getHash(id) % 10000)
+  const isHovered = useRef(false)
+
+  const [setIntersectionRef, intersection] = useIntersectionObserver()
+
+  const lenis = useLenis()
+  const prefersReducedMotion = usePreferredReducedMotion()
+
+  // order: 6, after Lenis (order -1; table in components/layout/lenis/index.tsx).
+  // Tempus defaults to order 0, which makes sequencing mount-order luck and
+  // reads `lenis.velocity` one frame stale.
+  useTempus(
+    ({ deltaTime }) => {
+      const entry = getEntry()
+
+      if (prefersReducedMotion) return
+      if (!intersection?.isIntersecting) return
+      if (pauseOnHover && isHovered.current) return
+
+      if (!entry?.borderBoxSize[0]?.inlineSize) return
+
+      let velocity = lenis?.velocity ?? 0
+      if (!scrollVelocity) {
+        velocity = 0
+      }
+      velocity = 1 + Math.abs(velocity / 5)
+
+      const offset = deltaTime * (speed * 0.1 * velocity)
+
+      if (reversed) {
+        transformRef.current -= offset
+      } else {
+        transformRef.current += offset
+      }
+
+      const width = entry.borderBoxSize[0].inlineSize
+      transformRef.current = modulo(transformRef.current, width)
+
+      // Sparse array: shrinking `repeat` removes entries (ref callback fires
+      // with null on detach), so iterate defined slots only — no stale nodes.
+      for (const node of elementsRef.current) {
+        if (!node) continue
+        node.style.transform = `translate3d(${-transformRef.current}px,0,0)`
+      }
+    },
+    { order: 6 }
+  )
+
+  return (
+    <section
+      ref={setIntersectionRef}
+      className={cn(className, s.marquee)}
+      aria-live="off"
+      aria-label="Scrolling content"
+      onPointerEnter={(e) => {
+        isHovered.current = true
+        onPointerEnter?.(e)
+      }}
+      onPointerLeave={(e) => {
+        isHovered.current = false
+        onPointerLeave?.(e)
+      }}
+      {...props}
+    >
+      {Array.from({ length: repeat })
+        .fill(children)
+        .map((_, i) => (
+          <div
+            // oxlint-disable-next-line react/no-array-index-key -- i can't come up with anything better tbh
+            key={`marquee-item-${i}`}
+            className={s.inner}
+            aria-hidden={i !== 0}
+            data-nosnippet={i !== 0 ? '' : undefined}
+            ref={(node) => {
+              if (!node) {
+                // Null on detach: clear the slot so the RAF loop stops
+                // animating a stale node (shrinking `repeat`).
+                elementsRef.current[i] = undefined
+                return
+              }
+              elementsRef.current[i] = node
+
+              if (i === 0) setRectRef(node)
+            }}
+          >
+            {children}
+          </div>
+        ))}
+    </section>
+  )
+}

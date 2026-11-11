@@ -1,0 +1,130 @@
+.header {
+  position: fixed;
+  top: var(--safe);
+  left: var(--safe);
+  z-index: 20;
+  font-family: var(--next-font-mono);
+  font-size: calc((10 * 100) / var(--device-width) * 1vw);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+
+  @media (--desktop) {
+    font-size: calc((11 * 100) / var(--device-width) * 1vw);
+  }
+}
+
+.brand {
+  font-size: calc((12 * 100) / var(--device-width) * 1vw);
+  margin-bottom: calc((6 * 100) / var(--device-width) * 1vw);
+  display: flex;
+  align-items: baseline;
+  gap: 0.15em;
+
+  @media (--desktop) {
+    font-size: calc((13 * 100) / var(--device-width) * 1vw);
+  }
+}
+
+.brandPath {
+  /* Contrast floor on both polarities: 0.55 gives 4.74:1 on white and 6.27:1
+     on black. Below ~0.535 fails white (0.5 was 3.94:1), below ~0.457 fails
+     black. Keep above 4.5:1. */
+  opacity: 0.55;
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.navItem {
+  display: flex;
+  align-items: center;
+  gap: 0.3em;
+}
+
+.chevron {
+  width: 0.75em;
+  flex-shrink: 0;
+  color: var(--color-contrast);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out-expo);
+}
+
+.chevronActive {
+  opacity: 1;
+}
+
+.navLink {
+  transition:
+    color var(--duration-fast) var(--ease-out-expo),
+    opacity var(--duration-fast) var(--ease-out-expo);
+
+  @media (--hover) {
+    &:hover {
+      color: var(--color-contrast);
+      text-decoration: none;
+      opacity: 1;
+    }
+  }
+}
+
+.navLinkActive {
+  opacity: 1;
+}
+
+.navLinkDim {
+  /* Same contrast floor as .brandPath; see its comment. */
+  opacity: 0.55;
+}
+
+.menuToggle {
+  display: none;
+  align-items: center;
+  gap: 0.4em;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  padding: 0;
+  min-height: 44px;
+  min-width: 44px;
+
+  @media (--mobile) {
+    display: flex;
+  }
+
+  @media (--motion-ok) {
+    transition: transform 160ms var(--ease-out-quart);
+
+    &:active {
+      transform: scale(0.97);
+    }
+  }
+}
+
+.navList {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+
+  @media (--mobile) {
+    display: none;
+    margin-top: calc((4 * 100) / var(--device-width) * 1vw);
+  }
+}
+
+.navListOpen {
+  @media (--mobile) {
+    display: flex;
+  }
+}
+
+@media (--mobile) {
+  .navItem {
+    min-height: 44px;
+  }
+}

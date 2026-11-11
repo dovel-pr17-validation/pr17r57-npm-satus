@@ -1,0 +1,26 @@
+@layer components {
+  .block {
+    width: auto;
+    height: auto;
+    display: block;
+  }
+}
+
+/*
+ * Default object-fit when `objectFit` isn't passed. `:where()` keeps it at
+ * (0,0,0) specificity, in the same `utilities` layer as Tailwind's `object-*`
+ * classes (lib/styles/css/index.css): any unlayered consumer CSS Module rule
+ * overrides it outright, and any Tailwind `object-*` utility overrides it
+ * within the layer. An explicit `objectFit` prop is an inline style and wins
+ * over both.
+ *
+ * `object-position` follows the same rule, from `--object-position` when a
+ * component sets it (`SanityImage` does, from the editor's hotspot); any
+ * `object-*` position class still wins.
+ */
+@layer utilities {
+  :where(.img) {
+    object-fit: cover;
+    object-position: var(--object-position, 50% 50%);
+  }
+}

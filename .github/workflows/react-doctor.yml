@@ -1,0 +1,38 @@
+name: React Doctor
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  react-doctor:
+    runs-on: ubuntu-latest
+
+    # Advisory only, like the Lighthouse workflow: nothing here fails the check.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so `--diff` can resolve the merge-base against the base branch.
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      # Its React Compiler rules activate only when the compiler is resolvable.
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # No --blocking: the job is advisory, so it would imply enforcement that
+      # is not there. Pinned for reproducible runs; bump deliberately.
+      - name: Run React Doctor on changed files
+        run: bunx react-doctor@0.4.2 --diff origin/${{ github.base_ref }} --verbose --no-telemetry

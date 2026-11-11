@@ -1,0 +1,57 @@
+# lib/seo — AI SEO (AEO)
+
+Makes the site legible to answer engines (ChatGPT, Claude, Perplexity, Google
+AI Overviews), not just search crawlers. Touch it when you change entity facts,
+add a route that should be crawlable/citable, or change how a page negotiates
+HTML vs. Markdown.
+
+**Files:**
+
+- `site.ts`: canonical entity facts (`SITE`, `BASE_URL`).
+- `schemas.ts`: typed schema.org JSON-LD node builders (Organization, WebSite, etc).
+- `json-ld.tsx`: renders a JSON-LD `<script>` tag from a schema.
+- `route-catalog.ts`: `STATIC_ROUTES`, starter-owned pages with no CMS backing
+  (label, description, sitemap metadata).
+- `routes.ts`: `ContentRoute` type, CMS-backed route lookup (`getCmsRoutes`)
+  and the `listableRoutes` filter, re-exports `STATIC_ROUTES`. Shared by the sitemap, `/llms.txt`, and `/ai` so
+  none of them can disagree about which URLs exist.
+- `agent-content.ts`: Markdown builders (`buildStaticRoutesMarkdown`,
+  `buildCmsRoutesMarkdown`, `buildAgentGuidanceMarkdown`,
+  `buildDeveloperResourcesMarkdown`) for `/llms.txt` and the `.md`
+  content-negotiation mirrors.
+- `markdown-path.ts`: path helpers (`markdownPathForRoute`,
+  `routePathFromMarkdown`) and the `/agent-content` handler path constant.
+- `markdown-document.ts`: builds the `MarkdownDocument` result (200/404/406, or
+  a redirect) for a page's Markdown representation.
+- `content-negotiation.ts`: `Accept`-header negotiation between `text/html` and
+  `text/markdown`, plus the one-shot HTML override param that breaks a
+  negotiation loop.
+- `alternates.ts`: builds a route's `alternates` metadata (canonical plus the
+  `text/plain` link to `/llms.txt`); `SITE_ALTERNATE_TYPES` is the
+  llms.txt-only block the app layout sets.
+
+**Consumers:** `app/llms.txt/route.ts` (from `SITE` and `getCmsRoutes()`);
+`app/(site)/ai/{layout,page}.tsx` (the `/ai` machine view); `app/agent-content/route.ts`
+(the Markdown mirror when negotiation picks `text/markdown`); `proxy.ts`
+(`negotiateDocumentType` and `routePathFromMarkdown` decide HTML, a Markdown
+redirect, or a 406); `app/sitemap.ts` (reads `STATIC_ROUTES` and `BASE_URL` so
+the sitemap matches the route catalog); `app/robots.ts` (reads `BASE_URL` for
+the sitemap link).
+
+## Policy
+
+- **Entity facts live in one file.** `lib/seo/site.ts`. JSON-LD, on-page prose, and `/llms.txt` all read from it, so they cannot disagree. Answer engines cross-check.
+- **Organization + WebSite JSON-LD render from the app layout** (`app/(site)/layout.tsx`), never from the homepage. Answer-engine traffic lands on deep pages; an entity that only exists on `/` is invisible to it.
+- **Never emit a JSON-LD key you cannot fill.** `"description": null` is worse than an absent key. Conditional-spread every optional field.
+- **Entity prose must be in the initial HTML and actually visible.** A visually quiet section is fine; `sr-only` or `display: none` reads as cloaking and gets discounted. A visual-first page (canvas, galleries) needs a plain-prose block or crawlers have nothing to cite.
+- **`Suspense fallback={null}` ships HTML with zero links.** Any client subtree that bails out of prerendering (`useSearchParams`, `cookies()`, `headers()`) leaves its fallback in the static HTML. If that fallback is `null`, crawlers see an empty page and the linked routes lose their only internal link. Server-render a static mirror of the list as the fallback; hydration swaps in the interactive version.
+- **Never redirect on user-agent without exempting bots.** Googlebot Smartphone, site auditors, and AI crawlers send mobile UAs, so a mobile redirect turns every sitemap entry into a 3XX. Gate any such redirect behind a bot check (`isbot`).
+- **Only indexable pages name a canonical.** `app/(site)/layout.tsx` sets none, because every route that declares no `alternates` would inherit it. Home, `/ai` and CMS pages set their own through `generatePageMetadata` (`lib/utils/metadata.ts`), which also builds the page's Open Graph and Twitter tags: Next replaces a parent's `openGraph` object whole, so a page setting only `title` would unfurl with the layout's. A noindex page (`/webgl`, `/sanity`, the 404, a CMS document with `metadata.noIndex`) carries no canonical.
+- **Noindex CMS documents resolve but are not listed.** `getCmsRoutes` returns them, so the page and its existence check work; sitemap.xml, `/llms.txt`, `/ai` and the Markdown page lists pass the routes through `listableRoutes`, which drops them.
+- **Markdown mirrors cover `STATIC_ROUTES` only.** A CMS page has no Markdown body: a `.md` or `Accept: text/markdown` request for one answers 303 to the HTML, or 406 when the client refuses HTML. CMS pages therefore advertise no `text/markdown` alternate; agents reach them through `/llms.txt`, `/ai` or the sitemap.
+- **`metadataBase` must be set** or OG/Twitter image paths stay relative and fail to resolve for scrapers. It is set in `app/(site)/layout.tsx`.
+- **Normalize CMS-authored hrefs** before rendering. Editors paste bare domains and mixed-case protocols; unnormalized values produce broken or duplicate-target links that leak crawl budget.
+- **`/llms.txt`** is generated from `lib/seo/site.ts` at `app/llms.txt/route.ts`.
+- **Ship a `/ai` machine view.** One plain-HTML route (`app/(site)/ai/page.tsx`) that names the entity and links every page, under its own layout with no chrome, no canvas and no client components of its own. Visual-first pages give answer engines nothing to cite; this gives them everything in one fetch. Keep it in sync with `app/sitemap.ts`: a route missing from either is invisible. It still inherits the app providers from `app/(site)/layout.tsx`; moving it out of the `(site)` group would make it runtime-free (the root `app/layout.tsx` is already a bare shell).
+- **Fetch CMS content with the published perspective for machine-readable routes.** Draft/preview perspectives embed stega encoding (invisible Unicode characters interleaved through every string for visual editing), which corrupts the text an LLM reads. Anything rendered into `/ai`, `/llms.txt`, or a `.md` mirror must come from a published-perspective fetch or be run through `stegaClean`.
+- **Drive any human/machine view toggle from a server prop, not the pathname.** Reading `usePathname()` to decide the mode makes the first paint ambiguous and can flip after hydration. Pass `mode` down from the layout that already knows.
